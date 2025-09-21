@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 import uvicorn
 from enum import Enum
-from rss_core import fetch_tribune_news
+from rss_core import fetch_tribune_news, fetch_news_by_category
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -54,6 +54,17 @@ class NewsDetail(BaseModel):
     img: Optional[str] = Field(None, description="Link to the news image")
     published: Optional[str] = Field(None, description="Publication date")
 
+class CategoryNewsItem(BaseModel):
+    title: str = Field(..., description="News title")
+    link: str = Field(..., description="Full article link")
+    img: Optional[str] = Field(None, description="Link to the news image")
+    full_content: str = Field(..., description="Full content of the news article")
+    published: Optional[str] = Field(None, description="Publication date")
+
+class CategoryNewsResponse(BaseModel):
+    news_items: List[CategoryNewsItem] = Field(..., description="List of news items for the category, sorted by recency")
+    category: str = Field(..., description="The queried category")
+    total_available: int = Field(..., description="Total news items available for the category")
 class Top10DetailsResponse(BaseModel):
     details: List[NewsDetail] = Field(..., description="Top 10 news details for the region, sorted by recency")
     region: str = Field(..., description="The queried region")
@@ -68,8 +79,22 @@ class Region(str, Enum):
     Jammu_Kashmir = "Jammu & Kashmir"
     Gilgit_Baltistan = "Gilgit-Baltistan"
 
+class Category(str, Enum):
+    Politics = "Politics"
+    Technology = "Technology"
+    Sports = "Sports"
+    Movies = "Movies"
+    Music = "Music"
+    Health = "Health"
+    Business = "Business"
+    World = "World"
+
+
 class Location(BaseModel):
     region: Region = Field(..., description="Valid regions in Pakistan")
+
+class NewsCategory(BaseModel):
+    category: Category = Field(..., description="Valid news categories")
 
 @app.get("/")
 async def home():
@@ -224,6 +249,47 @@ async def see_more_details(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching details: {str(e)}")
+
+@app.get("/category_news", response_model=CategoryNewsResponse)
+async def category_news(
+    category: Category = Query(..., description="Category to fetch news for"),
+    query: str = Query("", description="Optional keywords to filter (e.g., 'cricket')"),
+    days_back: int = Query(7, ge=1, le=30, description="Days to look back"),
+    max_items: int = Query(10, ge=1, le=50, description="Maximum number of news items to return")
+):
+    """
+    Fetch news items for a category from live RSS, sorted by recency.
+    Returns raw data (title, link, img, full_content, published) without LLM summaries.
+    """
+    try:
+        
+        news_items = await asyncio.to_thread(
+            fetch_news_by_category,
+            category=category, query=query, days_back=days_back, max_items=max_items
+        )
+        if not news_items:
+            raise HTTPException(status_code=404, detail=f"No recent news found for category '{category}' with query '{query}'")
+
+        # Prepare response
+        response_items = [
+            CategoryNewsItem(
+                title=item['title'],
+                link=item['link'],
+                img=item['img'],
+                full_content=item['full_content'] or item['summary'],
+                published=item.get('published')
+            ) for item in news_items
+        ]
+
+        return CategoryNewsResponse(
+            news_items=response_items,
+            category=category,
+            total_available=len(news_items)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching category news: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8002)
